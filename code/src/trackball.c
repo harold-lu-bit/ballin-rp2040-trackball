@@ -37,6 +37,7 @@
 #include "hardware/gpio.h"
 
 #include "pmw3360.h"
+#include "scroll.h"
 
 #define TOP_LEFT 16
 #define TOP_RIGHT 28
@@ -50,9 +51,6 @@
 #define CPI_LOW 800
 #define CPI_HIGH 1600
 #define HOLD_THRESHOLD_MS 200
-#define VERTICAL_SCROLL_DIVISOR 96
-#define HORIZONTAL_SCROLL_DIVISOR 128
-#define INVERT_VERTICAL_SCROLL 1
 
 typedef enum
 {
@@ -110,12 +108,32 @@ uint8_t const desc_hid_report[] = {
     0x75, 0x10,       //     REPORT_SIZE (16)
     0x95, 0x02,       //     REPORT_COUNT (2)
     0x81, 0x06,       //     INPUT (Data,Var,Rel)
+#if ENABLE_HIRES_WHEEL
+    0xA1, 0x02,       //     COLLECTION (Logical)
+    0x05, 0x01,       //       USAGE_PAGE (Generic Desktop)
+    0x09, 0x48,       //       USAGE (Resolution Multiplier)
+    0x15, 0x00,       //       LOGICAL_MINIMUM (0)
+    0x25, 0x0F,       //       LOGICAL_MAXIMUM (15)
+    0x35, 0x01,       //       PHYSICAL_MINIMUM (1)
+    0x45, 0x10,       //       PHYSICAL_MAXIMUM (16)
+    0x75, 0x08,       //       REPORT_SIZE (8)
+    0x95, 0x01,       //       REPORT_COUNT (1)
+    0xB1, 0x02,       //       FEATURE (Data,Var,Abs)
+    0x35, 0x00,       //       PHYSICAL_MINIMUM (0)
+    0x45, 0x00,       //       PHYSICAL_MAXIMUM (0)
+    0x05, 0x01,       //       USAGE_PAGE (Generic Desktop)
     0x09, 0x38,       //     USAGE (Wheel)
+#else
+    0x09, 0x38,       //     USAGE (Wheel)
+#endif
     0x15, 0x81,       //     LOGICAL_MINIMUM (-127)
     0x25, 0x7F,       //     LOGICAL_MAXIMUM (127)
     0x75, 0x08,       //     REPORT_SIZE (8)
     0x95, 0x01,       //     REPORT_COUNT (1)
     0x81, 0x06,       //     INPUT (Data,Var,Rel)
+#if ENABLE_HIRES_WHEEL
+    0xC0,             //     END_COLLECTION
+#endif
     0x05, 0x0C,       //     USAGE_PAGE (Consumer)
     0x0A, 0x38, 0x02, //     USAGE (AC Pan)
     0x15, 0x81,       //     LOGICAL_MINIMUM (-127)
@@ -143,34 +161,12 @@ char const *string_desc_arr[] = {
     "Trackball",                // 2: Product
 };
 
-// HID report
-typedef struct __attribute__((packed))
-{
-    uint8_t buttons;
-    int16_t dx;
-    int16_t dy;
-    int8_t wheel;
-    int8_t pan;
-} hid_report_t;
-
 hid_report_t report;
 top_left_state_t top_left_state;
 absolute_time_t top_left_pressed_at;
 bool top_right_was_pressed;
 bool middle_click_inflight;
 unsigned int current_cpi;
-int32_t vertical_scroll_accumulator;
-int32_t horizontal_scroll_accumulator;
-
-static int8_t clamp_scroll_steps(int32_t steps)
-{
-    if (steps > 127)
-        return 127;
-    if (steps < -127)
-        return -127;
-
-    return (int8_t)steps;
-}
 
 static void update_top_left_state(bool top_left_pressed)
 {
@@ -185,8 +181,7 @@ static void update_top_left_state(bool top_left_pressed)
                  absolute_time_diff_us(top_left_pressed_at, get_absolute_time()) >= (HOLD_THRESHOLD_MS * 1000))
         {
             top_left_state = TOP_LEFT_SCROLLING;
-            vertical_scroll_accumulator = 0;
-            horizontal_scroll_accumulator = 0;
+            scroll_reset();
         }
     }
     else
@@ -195,8 +190,7 @@ static void update_top_left_state(bool top_left_pressed)
             middle_click_inflight = true;
 
         top_left_state = TOP_LEFT_IDLE;
-        vertical_scroll_accumulator = 0;
-        horizontal_scroll_accumulator = 0;
+        scroll_reset();
     }
 }
 
@@ -217,36 +211,6 @@ static void fill_pointer_report(int16_t dx, int16_t dy)
     report.dy = -dy;
     report.wheel = 0;
     report.pan = 0;
-}
-
-static void fill_scroll_report(int16_t dx, int16_t dy)
-{
-    int32_t vertical_steps;
-    int32_t horizontal_steps = 0;
-
-#if INVERT_VERTICAL_SCROLL
-    vertical_scroll_accumulator += dy;
-#else
-    vertical_scroll_accumulator += -dy;
-#endif
-    vertical_steps = vertical_scroll_accumulator / VERTICAL_SCROLL_DIVISOR;
-    vertical_scroll_accumulator -= vertical_steps * VERTICAL_SCROLL_DIVISOR;
-
-    if (abs(dx) > abs(dy))
-    {
-        horizontal_scroll_accumulator += dx;
-        horizontal_steps = horizontal_scroll_accumulator / HORIZONTAL_SCROLL_DIVISOR;
-        horizontal_scroll_accumulator -= horizontal_steps * HORIZONTAL_SCROLL_DIVISOR;
-    }
-    else
-    {
-        horizontal_scroll_accumulator = 0;
-    }
-
-    report.dx = 0;
-    report.dy = 0;
-    report.wheel = clamp_scroll_steps(vertical_steps);
-    report.pan = clamp_scroll_steps(horizontal_steps);
 }
 
 void hid_task(void)
@@ -293,7 +257,7 @@ void hid_task(void)
     }
 
     if (top_left_state == TOP_LEFT_SCROLLING)
-        fill_scroll_report(dx, dy);
+        scroll_fill_report(dx, dy, &report);
     else if (top_left_state == TOP_LEFT_PENDING)
         fill_pointer_report(0, 0);
     else
@@ -324,8 +288,7 @@ void report_init(void)
     top_right_was_pressed = false;
     middle_click_inflight = false;
     current_cpi = CPI_LOW;
-    vertical_scroll_accumulator = 0;
-    horizontal_scroll_accumulator = 0;
+    scroll_init();
 }
 
 int main(void)
@@ -368,13 +331,18 @@ uint8_t const *tud_hid_descriptor_report_cb(uint8_t itf)
 // Return zero will cause the stack to STALL request
 uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t *buffer, uint16_t reqlen)
 {
-    return 0;
+    (void)itf;
+    (void)report_id;
+    return scroll_get_feature_report(report_type, buffer, reqlen);
 }
 
 // Invoked when received SET_REPORT control request or
 // received data on OUT endpoint ( Report ID = 0, Type = 0 )
 void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t const *buffer, uint16_t bufsize)
 {
+    (void)itf;
+    (void)report_id;
+    scroll_set_feature_report(report_type, buffer, bufsize);
 }
 
 // Invoked when received GET CONFIGURATION DESCRIPTOR

@@ -14,6 +14,17 @@ With the addition of two other buttons, you can map software on your computer to
 
 Alternatively, if you want hardware scrolling programmed on the trackball instead of your computer, you can also modify the source code for the trackball. 
 
+### Scroll tuning
+If you want to adjust the built-in scrolling behavior, the main knobs are:
+
+- `ENABLE_HIRES_WHEEL` in [code/src/scroll.h](/home/harold/Workspace/trackball/ballin-rp2040-trackball/code/src/scroll.h): enables the high-resolution wheel descriptor and logic. Set this to `0` to fall back to the simpler legacy wheel behavior.
+- `HOLD_THRESHOLD_MS` in [code/src/trackball.c](/home/harold/Workspace/trackball/ballin-rp2040-trackball/code/src/trackball.c): how long the top-left button must be held before the ball switches from pointer movement to scroll mode.
+- `SCROLL_BASE_BALL_UNITS_PER_DETENT` in [code/src/scroll.c](/home/harold/Workspace/trackball/ballin-rp2040-trackball/code/src/scroll.c): the main vertical scroll sensitivity. Larger values require more ball movement for one wheel step.
+- `SCROLL_DEFAULT_MULTIPLIER` in [code/src/scroll.c](/home/harold/Workspace/trackball/ballin-rp2040-trackball/code/src/scroll.c): default HID wheel multiplier exposed to the host. `1` is the safest compatibility setting.
+- `SCROLL_HORIZONTAL_DIVISOR` in [code/src/scroll.c](/home/harold/Workspace/trackball/ballin-rp2040-trackball/code/src/scroll.c): horizontal pan sensitivity. Larger values make side scrolling slower.
+- `SCROLL_MAX_REPORT_WHEEL` in [code/src/scroll.c](/home/harold/Workspace/trackball/ballin-rp2040-trackball/code/src/scroll.c): caps how much vertical wheel movement can be sent in a single USB report, which helps avoid overly large jumps during fast flicks.
+- `INVERT_VERTICAL_SCROLL` in [code/src/scroll.c](/home/harold/Workspace/trackball/ballin-rp2040-trackball/code/src/scroll.c): flips the vertical scroll direction if the current behavior feels backwards.
+
 ## Fabrication
 Requires:
 
@@ -63,4 +74,3 @@ To upload the compiled trackball.uf2 file from your computer to the trackball, p
 
 ## Demo
 https://github.com/user-attachments/assets/3003e133-2ebc-4bb3-9a59-b019c4e8687f
-

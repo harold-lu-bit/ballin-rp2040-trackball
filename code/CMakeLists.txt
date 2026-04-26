@@ -10,7 +10,7 @@ pico_sdk_init()
 
 add_compile_options(-Wall)
 
-add_executable(trackball src/trackball.c src/pmw3360.c src/srom.c)
+add_executable(trackball src/trackball.c src/scroll.c src/pmw3360.c src/srom.c)
 
 target_include_directories(trackball PRIVATE src)
 
