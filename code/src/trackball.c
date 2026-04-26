@@ -32,15 +32,34 @@
 #include "tusb.h"
 
 #include "pico/stdlib.h"
+#include "pico/time.h"
 
 #include "hardware/gpio.h"
 
 #include "pmw3360.h"
 
-#define TOP_LEFT 16 // Mouse 5
-#define TOP_RIGHT 28 // Mouse 4
-#define BOTTOM_LEFT 17 // Mouse 1
-#define BOTTOM_RIGHT 26 // Mouse 2
+#define TOP_LEFT 16
+#define TOP_RIGHT 28
+#define BOTTOM_LEFT 17
+#define BOTTOM_RIGHT 26
+
+#define BUTTON_LEFT 0x01
+#define BUTTON_RIGHT 0x02
+#define BUTTON_MIDDLE 0x04
+
+#define CPI_LOW 800
+#define CPI_HIGH 1600
+#define HOLD_THRESHOLD_MS 200
+#define VERTICAL_SCROLL_DIVISOR 96
+#define HORIZONTAL_SCROLL_DIVISOR 128
+#define INVERT_VERTICAL_SCROLL 1
+
+typedef enum
+{
+    TOP_LEFT_IDLE = 0,
+    TOP_LEFT_PENDING,
+    TOP_LEFT_SCROLLING
+} top_left_state_t;
 
 // These IDs are bogus. If you want to distribute any hardware using this,
 // you will have to get real ones.
@@ -74,14 +93,14 @@ uint8_t const desc_hid_report[] = {
     0xA1, 0x00,       //   COLLECTION (Physical)
     0x05, 0x09,       //     USAGE_PAGE (Button)
     0x19, 0x01,       //     USAGE_MINIMUM (1)
-    0x29, 0x05,       //     USAGE_MAXIMUM (5)     
+    0x29, 0x03,       //     USAGE_MAXIMUM (3)
     0x15, 0x00,       //     LOGICAL_MINIMUM (0)
     0x25, 0x01,       //     LOGICAL_MAXIMUM (1)
-    0x95, 0x05,       //     REPORT_COUNT (5)
+    0x95, 0x03,       //     REPORT_COUNT (3)
     0x75, 0x01,       //     REPORT_SIZE (1)
     0x81, 0x02,       //     INPUT (Data,Var,Abs)
     0x95, 0x01,       //     REPORT_COUNT (1)
-    0x75, 0x03,       //     REPORT_SIZE (3)       
+    0x75, 0x05,       //     REPORT_SIZE (5)
     0x81, 0x03,       //     INPUT (Const,Var,Abs)
     0x05, 0x01,       //     USAGE_PAGE (Generic Desktop)
     0x09, 0x30,       //     USAGE (X)
@@ -90,6 +109,19 @@ uint8_t const desc_hid_report[] = {
     0x26, 0xff, 0x7f, //     LOGICAL_MAXIMUM(32767)
     0x75, 0x10,       //     REPORT_SIZE (16)
     0x95, 0x02,       //     REPORT_COUNT (2)
+    0x81, 0x06,       //     INPUT (Data,Var,Rel)
+    0x09, 0x38,       //     USAGE (Wheel)
+    0x15, 0x81,       //     LOGICAL_MINIMUM (-127)
+    0x25, 0x7F,       //     LOGICAL_MAXIMUM (127)
+    0x75, 0x08,       //     REPORT_SIZE (8)
+    0x95, 0x01,       //     REPORT_COUNT (1)
+    0x81, 0x06,       //     INPUT (Data,Var,Rel)
+    0x05, 0x0C,       //     USAGE_PAGE (Consumer)
+    0x0A, 0x38, 0x02, //     USAGE (AC Pan)
+    0x15, 0x81,       //     LOGICAL_MINIMUM (-127)
+    0x25, 0x7F,       //     LOGICAL_MAXIMUM (127)
+    0x75, 0x08,       //     REPORT_SIZE (8)
+    0x95, 0x01,       //     REPORT_COUNT (1)
     0x81, 0x06,       //     INPUT (Data,Var,Rel)
     0xC0,             //   END_COLLECTION
     0xC0              // END COLLECTION
@@ -117,14 +149,114 @@ typedef struct __attribute__((packed))
     uint8_t buttons;
     int16_t dx;
     int16_t dy;
+    int8_t wheel;
+    int8_t pan;
 } hid_report_t;
 
 hid_report_t report;
+top_left_state_t top_left_state;
+absolute_time_t top_left_pressed_at;
+bool top_right_was_pressed;
+bool middle_click_inflight;
+unsigned int current_cpi;
+int32_t vertical_scroll_accumulator;
+int32_t horizontal_scroll_accumulator;
+
+static int8_t clamp_scroll_steps(int32_t steps)
+{
+    if (steps > 127)
+        return 127;
+    if (steps < -127)
+        return -127;
+
+    return (int8_t)steps;
+}
+
+static void update_top_left_state(bool top_left_pressed)
+{
+    if (top_left_pressed)
+    {
+        if (top_left_state == TOP_LEFT_IDLE)
+        {
+            top_left_state = TOP_LEFT_PENDING;
+            top_left_pressed_at = get_absolute_time();
+        }
+        else if (top_left_state == TOP_LEFT_PENDING &&
+                 absolute_time_diff_us(top_left_pressed_at, get_absolute_time()) >= (HOLD_THRESHOLD_MS * 1000))
+        {
+            top_left_state = TOP_LEFT_SCROLLING;
+            vertical_scroll_accumulator = 0;
+            horizontal_scroll_accumulator = 0;
+        }
+    }
+    else
+    {
+        if (top_left_state == TOP_LEFT_PENDING)
+            middle_click_inflight = true;
+
+        top_left_state = TOP_LEFT_IDLE;
+        vertical_scroll_accumulator = 0;
+        horizontal_scroll_accumulator = 0;
+    }
+}
+
+static void update_cpi_toggle(bool top_right_pressed)
+{
+    if (top_right_pressed && !top_right_was_pressed)
+    {
+        current_cpi = (current_cpi == CPI_LOW) ? CPI_HIGH : CPI_LOW;
+        pmw3360_set_cpi(current_cpi);
+    }
+
+    top_right_was_pressed = top_right_pressed;
+}
+
+static void fill_pointer_report(int16_t dx, int16_t dy)
+{
+    report.dx = dx;
+    report.dy = -dy;
+    report.wheel = 0;
+    report.pan = 0;
+}
+
+static void fill_scroll_report(int16_t dx, int16_t dy)
+{
+    int32_t vertical_steps;
+    int32_t horizontal_steps = 0;
+
+#if INVERT_VERTICAL_SCROLL
+    vertical_scroll_accumulator += dy;
+#else
+    vertical_scroll_accumulator += -dy;
+#endif
+    vertical_steps = vertical_scroll_accumulator / VERTICAL_SCROLL_DIVISOR;
+    vertical_scroll_accumulator -= vertical_steps * VERTICAL_SCROLL_DIVISOR;
+
+    if (abs(dx) > abs(dy))
+    {
+        horizontal_scroll_accumulator += dx;
+        horizontal_steps = horizontal_scroll_accumulator / HORIZONTAL_SCROLL_DIVISOR;
+        horizontal_scroll_accumulator -= horizontal_steps * HORIZONTAL_SCROLL_DIVISOR;
+    }
+    else
+    {
+        horizontal_scroll_accumulator = 0;
+    }
+
+    report.dx = 0;
+    report.dy = 0;
+    report.wheel = clamp_scroll_steps(vertical_steps);
+    report.pan = clamp_scroll_steps(horizontal_steps);
+}
 
 void hid_task(void)
 {
     int16_t dx;
     int16_t dy;
+    bool top_left_pressed;
+    bool top_right_pressed;
+    bool bottom_left_pressed;
+    bool bottom_right_pressed;
 
     if (!tud_hid_ready())
     {
@@ -133,20 +265,39 @@ void hid_task(void)
 
     pmw3360_get_deltas(&dx, &dy);
 
-    report.dx = dx;
-    report.dy = -dy;
-
     report.buttons = 0;
+    report.dx = 0;
+    report.dy = 0;
+    report.wheel = 0;
+    report.pan = 0;
 
-    if (!gpio_get(BOTTOM_LEFT))
-        report.buttons |= 0x01; // Bit 0 = Left Click
-    if (!gpio_get(BOTTOM_RIGHT))
-        report.buttons |= 0x02; // Bit 1 = Right Click
-    // if (!gpio_get(PIN_MMB))   report.buttons |= 0x04; // Bit 2 = Middle Click
-    if (!gpio_get(TOP_RIGHT))
-        report.buttons |= 0x08; // Bit 3 = Mouse Button 4 - 3 finger swipe
-    if (!gpio_get(TOP_LEFT))
-        report.buttons |= 0x10; // Bit 4 = Mouse Button 5 - scroll
+    top_left_pressed = !gpio_get(TOP_LEFT);
+    top_right_pressed = !gpio_get(TOP_RIGHT);
+    bottom_left_pressed = !gpio_get(BOTTOM_LEFT);
+    bottom_right_pressed = !gpio_get(BOTTOM_RIGHT);
+
+    update_top_left_state(top_left_pressed);
+    update_cpi_toggle(top_right_pressed);
+
+    if (bottom_left_pressed)
+        report.buttons |= BUTTON_LEFT;
+    if (bottom_right_pressed)
+        report.buttons |= BUTTON_RIGHT;
+
+    if (middle_click_inflight)
+    {
+        report.buttons |= BUTTON_MIDDLE;
+        middle_click_inflight = false;
+        tud_hid_report(0, &report, sizeof(report));
+        return;
+    }
+
+    if (top_left_state == TOP_LEFT_SCROLLING)
+        fill_scroll_report(dx, dy);
+    else if (top_left_state == TOP_LEFT_PENDING)
+        fill_pointer_report(0, 0);
+    else
+        fill_pointer_report(dx, dy);
 
     tud_hid_report(0, &report, sizeof(report));
 }
@@ -169,6 +320,12 @@ void pins_init(void)
 void report_init(void)
 {
     memset(&report, 0, sizeof(report));
+    top_left_state = TOP_LEFT_IDLE;
+    top_right_was_pressed = false;
+    middle_click_inflight = false;
+    current_cpi = CPI_LOW;
+    vertical_scroll_accumulator = 0;
+    horizontal_scroll_accumulator = 0;
 }
 
 int main(void)
@@ -180,7 +337,7 @@ int main(void)
     report_init();
     tusb_init();
 
-    pmw3360_set_cpi(800);
+    pmw3360_set_cpi(current_cpi);
 
     while (1)
     {
