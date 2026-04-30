@@ -109,6 +109,7 @@ uint8_t const desc_hid_report[] = {
     0x95, 0x02,       //     REPORT_COUNT (2)
     0x81, 0x06,       //     INPUT (Data,Var,Rel)
 #if ENABLE_HIRES_WHEEL
+    // This descriptor has no Report ID. The Resolution Multiplier feature report is one byte.
     0xA1, 0x02,       //     COLLECTION (Logical)
     0x05, 0x01,       //       USAGE_PAGE (Generic Desktop)
     0x09, 0x48,       //       USAGE (Resolution Multiplier)
@@ -332,8 +333,7 @@ uint8_t const *tud_hid_descriptor_report_cb(uint8_t itf)
 uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t *buffer, uint16_t reqlen)
 {
     (void)itf;
-    (void)report_id;
-    return scroll_get_feature_report(report_type, buffer, reqlen);
+    return scroll_get_feature_report(report_id, report_type, buffer, reqlen);
 }
 
 // Invoked when received SET_REPORT control request or
@@ -341,8 +341,7 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
 void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t const *buffer, uint16_t bufsize)
 {
     (void)itf;
-    (void)report_id;
-    scroll_set_feature_report(report_type, buffer, bufsize);
+    scroll_set_feature_report(report_id, report_type, buffer, bufsize);
 }
 
 // Invoked when received GET CONFIGURATION DESCRIPTOR

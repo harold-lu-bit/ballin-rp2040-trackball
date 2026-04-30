@@ -19,7 +19,7 @@ typedef struct __attribute__((packed))
 void scroll_init(void);
 void scroll_reset(void);
 void scroll_fill_report(int16_t dx, int16_t dy, hid_report_t *report);
-uint16_t scroll_get_feature_report(hid_report_type_t report_type, uint8_t *buffer, uint16_t reqlen);
-void scroll_set_feature_report(hid_report_type_t report_type, uint8_t const *buffer, uint16_t bufsize);
+uint16_t scroll_get_feature_report(uint8_t report_id, hid_report_type_t report_type, uint8_t *buffer, uint16_t reqlen);
+void scroll_set_feature_report(uint8_t report_id, hid_report_type_t report_type, uint8_t const *buffer, uint16_t bufsize);
 
 #endif
