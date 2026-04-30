@@ -75,7 +75,7 @@ static float scroll_gain_from_speed(int abs_dy)
 {
     if (abs_dy <= 1)
     {
-        return 0.85f;
+        return 0.80f;
     }
 
     if (abs_dy <= 12)
@@ -85,10 +85,10 @@ static float scroll_gain_from_speed(int abs_dy)
 
     if (abs_dy <= 28)
     {
-        return 1.1f;
+        return 1.2f;
     }
 
-    return 1.25f;
+    return 1.4f;
 }
 
 static uint8_t sanitized_multiplier(void)

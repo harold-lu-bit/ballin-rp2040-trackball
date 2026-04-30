@@ -51,6 +51,11 @@
 #define CPI_LOW 800
 #define CPI_HIGH 1600
 #define HOLD_THRESHOLD_MS 200
+#define BASE_POINTER_SCALE 1.0f
+#define POINTER_PRECISION_SPEED_LOW 1.0f
+#define POINTER_PRECISION_SPEED_HIGH 4.0f
+#define POINTER_PRECISION_SCALE_LOW 0.45f
+#define POINTER_PRECISION_SCALE_HIGH 1.0f
 
 typedef enum
 {
@@ -168,6 +173,8 @@ absolute_time_t top_left_pressed_at;
 bool top_right_was_pressed;
 bool middle_click_inflight;
 unsigned int current_cpi;
+float pointer_x_accumulator;
+float pointer_y_accumulator;
 
 static void update_top_left_state(bool top_left_pressed)
 {
@@ -206,10 +213,49 @@ static void update_cpi_toggle(bool top_right_pressed)
     top_right_was_pressed = top_right_pressed;
 }
 
+static void pointer_reset(void)
+{
+    pointer_x_accumulator = 0.0f;
+    pointer_y_accumulator = 0.0f;
+}
+
+static float pointer_precision_scale(int speed)
+{
+    if (speed <= POINTER_PRECISION_SPEED_LOW)
+    {
+        return POINTER_PRECISION_SCALE_LOW;
+    }
+
+    if (speed >= POINTER_PRECISION_SPEED_HIGH)
+    {
+        return POINTER_PRECISION_SCALE_HIGH;
+    }
+
+    float t = ((float)speed - POINTER_PRECISION_SPEED_LOW) /
+              (POINTER_PRECISION_SPEED_HIGH - POINTER_PRECISION_SPEED_LOW);
+
+    return POINTER_PRECISION_SCALE_LOW +
+           t * (POINTER_PRECISION_SCALE_HIGH - POINTER_PRECISION_SCALE_LOW);
+}
+
+static int16_t pointer_report_delta(float *accumulator, float scaled_delta)
+{
+    int16_t report_delta;
+
+    *accumulator += scaled_delta;
+    report_delta = (int16_t)*accumulator;
+    *accumulator -= (float)report_delta;
+
+    return report_delta;
+}
+
 static void fill_pointer_report(int16_t dx, int16_t dy)
 {
-    report.dx = dx;
-    report.dy = -dy;
+    int speed = abs(dx) > abs(dy) ? abs(dx) : abs(dy);
+    float scale = BASE_POINTER_SCALE * pointer_precision_scale(speed);
+
+    report.dx = pointer_report_delta(&pointer_x_accumulator, (float)dx * scale);
+    report.dy = -pointer_report_delta(&pointer_y_accumulator, (float)dy * scale);
     report.wheel = 0;
     report.pan = 0;
 }
@@ -258,11 +304,19 @@ void hid_task(void)
     }
 
     if (top_left_state == TOP_LEFT_SCROLLING)
+    {
+        pointer_reset();
         scroll_fill_report(dx, dy, &report);
+    }
     else if (top_left_state == TOP_LEFT_PENDING)
+    {
+        pointer_reset();
         fill_pointer_report(0, 0);
+    }
     else
+    {
         fill_pointer_report(dx, dy);
+    }
 
     tud_hid_report(0, &report, sizeof(report));
 }
@@ -289,6 +343,7 @@ void report_init(void)
     top_right_was_pressed = false;
     middle_click_inflight = false;
     current_cpi = CPI_LOW;
+    pointer_reset();
     scroll_init();
 }
 
