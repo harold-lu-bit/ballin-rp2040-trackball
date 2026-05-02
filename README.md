@@ -1,6 +1,6 @@
 # ballin
 
-**An open-source 4-button USB trackball powered by the RP2040.**
+**An open-source USB trackball powered by the RP2040.**
 
 ![](./imgs/IMG_1.jpg)
 
@@ -8,17 +8,23 @@ Uses [Jacek Fedorynski's](https://github.com/jfedor2) original PMW3360 trackball
 
 3D models remixed from [here](https://www.printables.com/model/267954-trackball-15de/comments)
 
-The four buttons map to Left Mouse Button, Right Mouse Button, Mouse 4, and Mouse 5. The original model only had 2 buttons, which was not adequate to implement scrolling and swiping functionality on top of the basic left and right clicking.
+The firmware currently exposes seven physical buttons with this default mapping:
 
-With the addition of two other buttons, you can map software on your computer to enable scrolling and swiping behaviors when you hold certain mouse buttons. I'm personally a fan of using [Mac Mouse Fix](https://github.com/noah-nuebling/mac-mouse-fix) on all my Mac computers to map Mouse 5 to scrolling when dragged, and Mouse 4 to the 3 fingered swipe that allows you to switch between desktops and spaces and mission control. 
+- `SIDE_MIDDLE`: Left Mouse Button
+- `SIDE_RIGHT`: Right Mouse Button
+- `SIDE_LEFT`: Mouse Middle Button
+- `BOTTOM_LEFT`: Mouse 5 / Forward
+- `BOTTOM_RIGHT`: Mouse 4 / Back
+- `TOP_LEFT`: DPI down
+- `TOP_RIGHT`: DPI up
 
-Alternatively, if you want hardware scrolling programmed on the trackball instead of your computer, you can also modify the source code for the trackball. 
+Hardware scrolling is built into the firmware: press the left and right mouse buttons (`SIDE_MIDDLE` + `SIDE_RIGHT`) within `60ms` to enter scroll mode. While scrolling, left/right button events are suppressed; releasing either button exits scroll mode and temporarily locks left/right clicks until both buttons are fully released again.
 
 ### Scroll tuning
 If you want to adjust the built-in scrolling behavior, the main knobs are:
 
 - `ENABLE_HIRES_WHEEL` in [code/src/scroll.h](/home/harold/Workspace/trackball/ballin-rp2040-trackball/code/src/scroll.h): enables the high-resolution wheel descriptor and logic. Set this to `0` to fall back to the simpler legacy wheel behavior.
-- `HOLD_THRESHOLD_MS` in [code/src/trackball.c](/home/harold/Workspace/trackball/ballin-rp2040-trackball/code/src/trackball.c): how long the top-left button must be held before the ball switches from pointer movement to scroll mode.
+- `CHORD_MS` in [code/src/trackball.c](/home/harold/Workspace/trackball/ballin-rp2040-trackball/code/src/trackball.c): the maximum delay between left and right button presses to enter scroll mode.
 - `SCROLL_BASE_BALL_UNITS_PER_DETENT` in [code/src/scroll.c](/home/harold/Workspace/trackball/ballin-rp2040-trackball/code/src/scroll.c): the main vertical scroll sensitivity. Larger values require more ball movement for one wheel step.
 - `SCROLL_DEFAULT_MULTIPLIER` in [code/src/scroll.c](/home/harold/Workspace/trackball/ballin-rp2040-trackball/code/src/scroll.c): default HID wheel multiplier exposed to the host. `1` is the safest compatibility setting.
 - `SCROLL_HORIZONTAL_DIVISOR` in [code/src/scroll.c](/home/harold/Workspace/trackball/ballin-rp2040-trackball/code/src/scroll.c): horizontal pan sensitivity. Larger values make side scrolling slower.
@@ -44,12 +50,15 @@ I 3D printed the parts at .20 layer height, no supports needed. I used 40% spars
 For the plates that hold the micro switchees, depending on your 3D printer's tolerances, the holes might not be big enough to fit the micro switch legs. I would suggest to first try widening them with some tweezers, if that doesn't work, adjust the X-Y hole compensation by + .1mm maybe. It's better for the holes to be tight and grip onto the switches well than to be too loose and have your switches wobble around. 
 
 ### Soldering button pins
-Another thing to note is which pins on the PCB you solder your mouse buttons to. In the current compiled trackball.uf2, I have the pins for the buttons defined as thus below. If you use different pins, you would need to modify this code in [code/src/trackball.c](https://github.com/SamIAm2000/ballin-rp2040-trackball/blob/main/code/src/trackball.c)
-```
-#define TOP_LEFT 16 // Mouse 5
-#define TOP_RIGHT 28 // Mouse 4
-#define BOTTOM_LEFT 17 // Mouse 1
-#define BOTTOM_RIGHT 26 // Mouse 2
+Another thing to note is which pins on the PCB you solder your mouse buttons to. In the current compiled `trackball.uf2`, the buttons are defined like this in [code/src/trackball.c](https://github.com/SamIAm2000/ballin-rp2040-trackball/blob/main/code/src/trackball.c):
+``` 
+#define TOP_LEFT 16 // DPI down
+#define TOP_RIGHT 28 // DPI up
+#define BOTTOM_LEFT 17 // Mouse 5 / Forward
+#define BOTTOM_RIGHT 26 // Mouse 4 / Back
+#define SIDE_MIDDLE 18 // Mouse 1 / Left
+#define SIDE_LEFT 19 // Mouse 3 / Middle
+#define SIDE_RIGHT 20 // Mouse 2 / Right
 ```
 
 ![IMG_2.JPG](./imgs/IMG_2.JPG)

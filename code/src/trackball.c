@@ -54,9 +54,7 @@
 #define BUTTON_BACK 0x08
 #define BUTTON_FORWARD 0x10
 
-#define CPI_LOW 800
-#define CPI_HIGH 1600
-#define HOLD_THRESHOLD_MS 200
+#define CHORD_MS 60
 #define BOOTSEL_HOLD_THRESHOLD_MS 2000
 #define BASE_POINTER_SCALE 1.0f
 #define POINTER_PRECISION_SPEED_LOW 1.0f
@@ -66,10 +64,16 @@
 
 typedef enum
 {
-    SIDE_LEFT_IDLE = 0,
-    SIDE_LEFT_PENDING,
-    SIDE_LEFT_SCROLLING
-} side_left_state_t;
+    PRIMARY_IDLE = 0,
+    PRIMARY_PENDING_L,
+    PRIMARY_PENDING_R,
+    PRIMARY_NORMAL_L,
+    PRIMARY_NORMAL_R,
+    PRIMARY_SCROLL,
+    PRIMARY_LOCKOUT
+} primary_button_state_t;
+
+static const unsigned int cpi_levels[] = {800, 1600};
 
 // These IDs are bogus. If you want to distribute any hardware using this,
 // you will have to get real ones.
@@ -176,18 +180,47 @@ char const *string_desc_arr[] = {
 };
 
 hid_report_t report;
-side_left_state_t side_left_state;
-absolute_time_t side_left_pressed_at;
+primary_button_state_t primary_button_state;
+absolute_time_t primary_pressed_at;
 absolute_time_t bootsel_pressed_at;
 bool bootsel_armed;
-bool dpi_toggle_was_pressed;
-unsigned int current_cpi;
+bool dpi_down_was_pressed;
+bool dpi_up_was_pressed;
+size_t current_cpi_index;
+uint8_t primary_click_pulse_mask;
 float pointer_x_accumulator;
 float pointer_y_accumulator;
 
+static size_t cpi_level_count(void)
+{
+    return sizeof(cpi_levels) / sizeof(cpi_levels[0]);
+}
+
+static unsigned int current_cpi(void)
+{
+    return cpi_levels[current_cpi_index];
+}
+
+static bool primary_state_is_scroll_locked(void)
+{
+    return primary_button_state == PRIMARY_SCROLL || primary_button_state == PRIMARY_LOCKOUT;
+}
+
+static void enter_scroll_mode(void)
+{
+    primary_button_state = PRIMARY_SCROLL;
+    scroll_reset();
+}
+
+static void exit_scroll_mode(void)
+{
+    primary_button_state = PRIMARY_LOCKOUT;
+    scroll_reset();
+}
+
 static void maybe_enter_bootsel(bool bootsel_combo_pressed)
 {
-    if (side_left_state != SIDE_LEFT_IDLE)
+    if (primary_state_is_scroll_locked())
     {
         bootsel_armed = false;
         return;
@@ -213,38 +246,151 @@ static void maybe_enter_bootsel(bool bootsel_combo_pressed)
     }
 }
 
-static void update_side_left_state(bool side_left_pressed)
+static void update_primary_button_state(bool left_pressed, bool right_pressed)
 {
-    if (side_left_pressed)
+    primary_click_pulse_mask = 0;
+
+    switch (primary_button_state)
     {
-        if (side_left_state == SIDE_LEFT_IDLE)
+    case PRIMARY_IDLE:
+        if (left_pressed && right_pressed)
         {
-            side_left_state = SIDE_LEFT_PENDING;
-            side_left_pressed_at = get_absolute_time();
+            enter_scroll_mode();
         }
-        else if (side_left_state == SIDE_LEFT_PENDING &&
-                 absolute_time_diff_us(side_left_pressed_at, get_absolute_time()) >= (HOLD_THRESHOLD_MS * 1000))
+        else if (left_pressed)
         {
-            side_left_state = SIDE_LEFT_SCROLLING;
-            scroll_reset();
+            primary_button_state = PRIMARY_PENDING_L;
+            primary_pressed_at = get_absolute_time();
         }
-    }
-    else
-    {
-        side_left_state = SIDE_LEFT_IDLE;
-        scroll_reset();
+        else if (right_pressed)
+        {
+            primary_button_state = PRIMARY_PENDING_R;
+            primary_pressed_at = get_absolute_time();
+        }
+        break;
+
+    case PRIMARY_PENDING_L:
+        if (!left_pressed)
+        {
+            primary_button_state = PRIMARY_IDLE;
+            primary_click_pulse_mask = BUTTON_LEFT;
+        }
+        else if (right_pressed &&
+                 absolute_time_diff_us(primary_pressed_at, get_absolute_time()) <= (CHORD_MS * 1000))
+        {
+            enter_scroll_mode();
+        }
+        else if (absolute_time_diff_us(primary_pressed_at, get_absolute_time()) >= (CHORD_MS * 1000))
+        {
+            primary_button_state = PRIMARY_NORMAL_L;
+        }
+        break;
+
+    case PRIMARY_PENDING_R:
+        if (!right_pressed)
+        {
+            primary_button_state = PRIMARY_IDLE;
+            primary_click_pulse_mask = BUTTON_RIGHT;
+        }
+        else if (left_pressed &&
+                 absolute_time_diff_us(primary_pressed_at, get_absolute_time()) <= (CHORD_MS * 1000))
+        {
+            enter_scroll_mode();
+        }
+        else if (absolute_time_diff_us(primary_pressed_at, get_absolute_time()) >= (CHORD_MS * 1000))
+        {
+            primary_button_state = PRIMARY_NORMAL_R;
+        }
+        break;
+
+    case PRIMARY_NORMAL_L:
+        if (!left_pressed)
+        {
+            primary_button_state = right_pressed ? PRIMARY_NORMAL_R : PRIMARY_IDLE;
+        }
+        break;
+
+    case PRIMARY_NORMAL_R:
+        if (!right_pressed)
+        {
+            primary_button_state = left_pressed ? PRIMARY_NORMAL_L : PRIMARY_IDLE;
+        }
+        break;
+
+    case PRIMARY_SCROLL:
+        if (!left_pressed || !right_pressed)
+        {
+            exit_scroll_mode();
+        }
+        break;
+
+    case PRIMARY_LOCKOUT:
+        if (!left_pressed && !right_pressed)
+        {
+            primary_button_state = PRIMARY_IDLE;
+        }
+        break;
     }
 }
 
-static void update_cpi_toggle(bool dpi_toggle_pressed)
+static uint8_t primary_buttons_report(bool left_pressed, bool right_pressed)
 {
-    if (dpi_toggle_pressed && !dpi_toggle_was_pressed)
+    uint8_t buttons = primary_click_pulse_mask;
+
+    switch (primary_button_state)
     {
-        current_cpi = (current_cpi == CPI_LOW) ? CPI_HIGH : CPI_LOW;
-        pmw3360_set_cpi(current_cpi);
+    case PRIMARY_NORMAL_L:
+        buttons |= BUTTON_LEFT;
+
+        if (right_pressed)
+        {
+            buttons |= BUTTON_RIGHT;
+        }
+        break;
+
+    case PRIMARY_NORMAL_R:
+        buttons |= BUTTON_RIGHT;
+
+        if (left_pressed)
+        {
+            buttons |= BUTTON_LEFT;
+        }
+        break;
+
+    default:
+        break;
     }
 
-    dpi_toggle_was_pressed = dpi_toggle_pressed;
+    return buttons;
+}
+
+static void apply_cpi_index(size_t new_index)
+{
+    if (new_index == current_cpi_index)
+    {
+        return;
+    }
+
+    current_cpi_index = new_index;
+    pmw3360_set_cpi(current_cpi());
+}
+
+static void update_cpi_buttons(bool dpi_down_pressed, bool dpi_up_pressed)
+{
+    size_t last_index = cpi_level_count() - 1;
+
+    if (dpi_down_pressed && !dpi_down_was_pressed && current_cpi_index > 0)
+    {
+        apply_cpi_index(current_cpi_index - 1);
+    }
+
+    if (dpi_up_pressed && !dpi_up_was_pressed && current_cpi_index < last_index)
+    {
+        apply_cpi_index(current_cpi_index + 1);
+    }
+
+    dpi_down_was_pressed = dpi_down_pressed;
+    dpi_up_was_pressed = dpi_up_pressed;
 }
 
 static void pointer_reset(void)
@@ -329,30 +475,23 @@ void hid_task(void)
     side_right_pressed = gpio_get(SIDE_RIGHT);
     bootsel_combo_pressed = bottom_left_pressed && bottom_right_pressed;
 
-    update_side_left_state(side_left_pressed);
+    update_primary_button_state(side_middle_pressed, side_right_pressed);
     maybe_enter_bootsel(bootsel_combo_pressed);
-    update_cpi_toggle(bottom_right_pressed && !bootsel_combo_pressed);
+    update_cpi_buttons(top_left_pressed, top_right_pressed);
 
-    if (side_middle_pressed)
-        report.buttons |= BUTTON_LEFT;
-    if (side_right_pressed)
-        report.buttons |= BUTTON_RIGHT;
-    if (bottom_left_pressed && !bootsel_combo_pressed)
+    report.buttons |= primary_buttons_report(side_middle_pressed, side_right_pressed);
+
+    if (side_left_pressed)
         report.buttons |= BUTTON_MIDDLE;
-    if (top_left_pressed)
-        report.buttons |= BUTTON_BACK;
-    if (top_right_pressed)
+    if (bottom_left_pressed && !bootsel_combo_pressed)
         report.buttons |= BUTTON_FORWARD;
+    if (bottom_right_pressed && !bootsel_combo_pressed)
+        report.buttons |= BUTTON_BACK;
 
-    if (side_left_state == SIDE_LEFT_SCROLLING)
+    if (primary_button_state == PRIMARY_SCROLL)
     {
         pointer_reset();
         scroll_fill_report(dx, dy, &report);
-    }
-    else if (side_left_state == SIDE_LEFT_PENDING)
-    {
-        pointer_reset();
-        fill_pointer_report(0, 0);
     }
     else
     {
@@ -390,10 +529,12 @@ void pins_init(void)
 void report_init(void)
 {
     memset(&report, 0, sizeof(report));
-    side_left_state = SIDE_LEFT_IDLE;
+    primary_button_state = PRIMARY_IDLE;
     bootsel_armed = false;
-    dpi_toggle_was_pressed = false;
-    current_cpi = CPI_LOW;
+    dpi_down_was_pressed = false;
+    dpi_up_was_pressed = false;
+    current_cpi_index = 0;
+    primary_click_pulse_mask = 0;
     pointer_reset();
     scroll_init();
 }
@@ -407,7 +548,7 @@ int main(void)
     report_init();
     tusb_init();
 
-    pmw3360_set_cpi(current_cpi);
+    pmw3360_set_cpi(current_cpi());
 
     while (1)
     {
