@@ -31,6 +31,7 @@
 #include "bsp/board.h"
 #include "tusb.h"
 
+#include "pico/bootrom.h"
 #include "pico/stdlib.h"
 #include "pico/time.h"
 
@@ -43,14 +44,20 @@
 #define TOP_RIGHT 28
 #define BOTTOM_LEFT 17
 #define BOTTOM_RIGHT 26
+#define SIDE_MIDDLE 18
+#define SIDE_LEFT 19
+#define SIDE_RIGHT 20
 
 #define BUTTON_LEFT 0x01
 #define BUTTON_RIGHT 0x02
 #define BUTTON_MIDDLE 0x04
+#define BUTTON_BACK 0x08
+#define BUTTON_FORWARD 0x10
 
 #define CPI_LOW 800
 #define CPI_HIGH 1600
 #define HOLD_THRESHOLD_MS 200
+#define BOOTSEL_HOLD_THRESHOLD_MS 2000
 #define BASE_POINTER_SCALE 1.0f
 #define POINTER_PRECISION_SPEED_LOW 1.0f
 #define POINTER_PRECISION_SPEED_HIGH 4.0f
@@ -59,10 +66,10 @@
 
 typedef enum
 {
-    TOP_LEFT_IDLE = 0,
-    TOP_LEFT_PENDING,
-    TOP_LEFT_SCROLLING
-} top_left_state_t;
+    SIDE_LEFT_IDLE = 0,
+    SIDE_LEFT_PENDING,
+    SIDE_LEFT_SCROLLING
+} side_left_state_t;
 
 // These IDs are bogus. If you want to distribute any hardware using this,
 // you will have to get real ones.
@@ -96,14 +103,14 @@ uint8_t const desc_hid_report[] = {
     0xA1, 0x00,       //   COLLECTION (Physical)
     0x05, 0x09,       //     USAGE_PAGE (Button)
     0x19, 0x01,       //     USAGE_MINIMUM (1)
-    0x29, 0x03,       //     USAGE_MAXIMUM (3)
+    0x29, 0x05,       //     USAGE_MAXIMUM (5)
     0x15, 0x00,       //     LOGICAL_MINIMUM (0)
     0x25, 0x01,       //     LOGICAL_MAXIMUM (1)
-    0x95, 0x03,       //     REPORT_COUNT (3)
+    0x95, 0x05,       //     REPORT_COUNT (5)
     0x75, 0x01,       //     REPORT_SIZE (1)
     0x81, 0x02,       //     INPUT (Data,Var,Abs)
     0x95, 0x01,       //     REPORT_COUNT (1)
-    0x75, 0x05,       //     REPORT_SIZE (5)
+    0x75, 0x03,       //     REPORT_SIZE (3)
     0x81, 0x03,       //     INPUT (Const,Var,Abs)
     0x05, 0x01,       //     USAGE_PAGE (Generic Desktop)
     0x09, 0x30,       //     USAGE (X)
@@ -159,7 +166,8 @@ uint8_t const desc_configuration[] = {
     TUD_CONFIG_DESCRIPTOR(1, 1, 0, CONFIG_TOTAL_LEN, 0, 100),
 
     // Interface number, string index, protocol, report descriptor len, EP In address, size & polling interval
-    TUD_HID_DESCRIPTOR(0, 0, HID_ITF_PROTOCOL_NONE, sizeof(desc_hid_report), EPNUM_HID, CFG_TUD_HID_EP_BUFSIZE, 1)};
+    TUD_HID_DESCRIPTOR(0, 0, HID_ITF_PROTOCOL_NONE, sizeof(desc_hid_report), EPNUM_HID, CFG_TUD_HID_EP_BUFSIZE, 1)
+};
 
 char const *string_desc_arr[] = {
     (const char[]){0x09, 0x04}, // 0: is supported language is English (0x0409)
@@ -168,49 +176,75 @@ char const *string_desc_arr[] = {
 };
 
 hid_report_t report;
-top_left_state_t top_left_state;
-absolute_time_t top_left_pressed_at;
-bool top_right_was_pressed;
-bool middle_click_inflight;
+side_left_state_t side_left_state;
+absolute_time_t side_left_pressed_at;
+absolute_time_t bootsel_pressed_at;
+bool bootsel_armed;
+bool dpi_toggle_was_pressed;
 unsigned int current_cpi;
 float pointer_x_accumulator;
 float pointer_y_accumulator;
 
-static void update_top_left_state(bool top_left_pressed)
+static void maybe_enter_bootsel(bool bootsel_combo_pressed)
 {
-    if (top_left_pressed)
+    if (side_left_state != SIDE_LEFT_IDLE)
     {
-        if (top_left_state == TOP_LEFT_IDLE)
+        bootsel_armed = false;
+        return;
+    }
+
+    if (!bootsel_combo_pressed)
+    {
+        bootsel_armed = false;
+        return;
+    }
+
+    if (!bootsel_armed)
+    {
+        bootsel_armed = true;
+        bootsel_pressed_at = get_absolute_time();
+        return;
+    }
+
+    if (absolute_time_diff_us(bootsel_pressed_at, get_absolute_time()) >=
+        (BOOTSEL_HOLD_THRESHOLD_MS * 1000))
+    {
+        reset_usb_boot(0, 0);
+    }
+}
+
+static void update_side_left_state(bool side_left_pressed)
+{
+    if (side_left_pressed)
+    {
+        if (side_left_state == SIDE_LEFT_IDLE)
         {
-            top_left_state = TOP_LEFT_PENDING;
-            top_left_pressed_at = get_absolute_time();
+            side_left_state = SIDE_LEFT_PENDING;
+            side_left_pressed_at = get_absolute_time();
         }
-        else if (top_left_state == TOP_LEFT_PENDING &&
-                 absolute_time_diff_us(top_left_pressed_at, get_absolute_time()) >= (HOLD_THRESHOLD_MS * 1000))
+        else if (side_left_state == SIDE_LEFT_PENDING &&
+                 absolute_time_diff_us(side_left_pressed_at, get_absolute_time()) >= (HOLD_THRESHOLD_MS * 1000))
         {
-            top_left_state = TOP_LEFT_SCROLLING;
+            side_left_state = SIDE_LEFT_SCROLLING;
             scroll_reset();
         }
     }
     else
     {
-        if (top_left_state == TOP_LEFT_PENDING)
-            middle_click_inflight = true;
-
-        top_left_state = TOP_LEFT_IDLE;
+        side_left_state = SIDE_LEFT_IDLE;
         scroll_reset();
     }
 }
 
-static void update_cpi_toggle(bool top_right_pressed)
+static void update_cpi_toggle(bool dpi_toggle_pressed)
 {
-    if (top_right_pressed && !top_right_was_pressed)
+    if (dpi_toggle_pressed && !dpi_toggle_was_pressed)
     {
         current_cpi = (current_cpi == CPI_LOW) ? CPI_HIGH : CPI_LOW;
         pmw3360_set_cpi(current_cpi);
     }
 
-    top_right_was_pressed = top_right_pressed;
+    dpi_toggle_was_pressed = dpi_toggle_pressed;
 }
 
 static void pointer_reset(void)
@@ -268,6 +302,10 @@ void hid_task(void)
     bool top_right_pressed;
     bool bottom_left_pressed;
     bool bottom_right_pressed;
+    bool side_middle_pressed;
+    bool side_left_pressed;
+    bool side_right_pressed;
+    bool bootsel_combo_pressed;
 
     if (!tud_hid_ready())
     {
@@ -286,29 +324,32 @@ void hid_task(void)
     top_right_pressed = !gpio_get(TOP_RIGHT);
     bottom_left_pressed = !gpio_get(BOTTOM_LEFT);
     bottom_right_pressed = !gpio_get(BOTTOM_RIGHT);
+    side_middle_pressed = gpio_get(SIDE_MIDDLE);
+    side_left_pressed = gpio_get(SIDE_LEFT);
+    side_right_pressed = gpio_get(SIDE_RIGHT);
+    bootsel_combo_pressed = bottom_left_pressed && bottom_right_pressed;
 
-    update_top_left_state(top_left_pressed);
-    update_cpi_toggle(top_right_pressed);
+    update_side_left_state(side_left_pressed);
+    maybe_enter_bootsel(bootsel_combo_pressed);
+    update_cpi_toggle(bottom_right_pressed && !bootsel_combo_pressed);
 
-    if (bottom_left_pressed)
+    if (side_middle_pressed)
         report.buttons |= BUTTON_LEFT;
-    if (bottom_right_pressed)
+    if (side_right_pressed)
         report.buttons |= BUTTON_RIGHT;
-
-    if (middle_click_inflight)
-    {
+    if (bottom_left_pressed && !bootsel_combo_pressed)
         report.buttons |= BUTTON_MIDDLE;
-        middle_click_inflight = false;
-        tud_hid_report(0, &report, sizeof(report));
-        return;
-    }
+    if (top_left_pressed)
+        report.buttons |= BUTTON_BACK;
+    if (top_right_pressed)
+        report.buttons |= BUTTON_FORWARD;
 
-    if (top_left_state == TOP_LEFT_SCROLLING)
+    if (side_left_state == SIDE_LEFT_SCROLLING)
     {
         pointer_reset();
         scroll_fill_report(dx, dy, &report);
     }
-    else if (top_left_state == TOP_LEFT_PENDING)
+    else if (side_left_state == SIDE_LEFT_PENDING)
     {
         pointer_reset();
         fill_pointer_report(0, 0);
@@ -328,20 +369,30 @@ void pin_init(uint pin)
     gpio_pull_up(pin);
 }
 
+void pin_init_pulldown(uint pin)
+{
+    gpio_init(pin);
+    gpio_set_dir(pin, GPIO_IN);
+    gpio_pull_down(pin);
+}
+
 void pins_init(void)
 {
     pin_init(TOP_LEFT);
     pin_init(TOP_RIGHT);
     pin_init(BOTTOM_LEFT);
     pin_init(BOTTOM_RIGHT);
+    pin_init_pulldown(SIDE_MIDDLE);
+    pin_init_pulldown(SIDE_LEFT);
+    pin_init_pulldown(SIDE_RIGHT);
 }
 
 void report_init(void)
 {
     memset(&report, 0, sizeof(report));
-    top_left_state = TOP_LEFT_IDLE;
-    top_right_was_pressed = false;
-    middle_click_inflight = false;
+    side_left_state = SIDE_LEFT_IDLE;
+    bootsel_armed = false;
+    dpi_toggle_was_pressed = false;
     current_cpi = CPI_LOW;
     pointer_reset();
     scroll_init();
