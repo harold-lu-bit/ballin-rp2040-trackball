@@ -69,9 +69,18 @@ typedef enum
     PRIMARY_PENDING_R,
     PRIMARY_NORMAL_L,
     PRIMARY_NORMAL_R,
-    PRIMARY_SCROLL,
-    PRIMARY_LOCKOUT
+    PRIMARY_SCROLL_HELD,
+    PRIMARY_SCROLL_LATCHED,
+    PRIMARY_SCROLL_EXIT_PENDING
 } primary_button_state_t;
+
+typedef enum
+{
+    SCROLL_EXIT_NONE = 0,
+    SCROLL_EXIT_LEFT,
+    SCROLL_EXIT_RIGHT,
+    SCROLL_EXIT_MIDDLE
+} scroll_exit_button_t;
 
 static const unsigned int cpi_levels[] = {800, 1600};
 
@@ -188,6 +197,8 @@ bool dpi_down_was_pressed;
 bool dpi_up_was_pressed;
 size_t current_cpi_index;
 uint8_t primary_click_pulse_mask;
+scroll_exit_button_t scroll_exit_button;
+bool scroll_exit_ready;
 float pointer_x_accumulator;
 float pointer_y_accumulator;
 
@@ -201,26 +212,50 @@ static unsigned int current_cpi(void)
     return cpi_levels[current_cpi_index];
 }
 
-static bool primary_state_is_scroll_locked(void)
+static bool primary_state_is_scroll_mode(void)
 {
-    return primary_button_state == PRIMARY_SCROLL || primary_button_state == PRIMARY_LOCKOUT;
+    return primary_button_state == PRIMARY_SCROLL_HELD ||
+           primary_button_state == PRIMARY_SCROLL_LATCHED ||
+           primary_button_state == PRIMARY_SCROLL_EXIT_PENDING;
 }
 
 static void enter_scroll_mode(void)
 {
-    primary_button_state = PRIMARY_SCROLL;
+    primary_button_state = PRIMARY_SCROLL_HELD;
+    scroll_exit_button = SCROLL_EXIT_NONE;
+    scroll_exit_ready = false;
     scroll_reset();
 }
 
-static void exit_scroll_mode(void)
+static void leave_scroll_mode(void)
 {
-    primary_button_state = PRIMARY_LOCKOUT;
+    primary_button_state = PRIMARY_IDLE;
+    scroll_exit_button = SCROLL_EXIT_NONE;
+    scroll_exit_ready = false;
     scroll_reset();
+}
+
+static bool tracked_scroll_exit_button_pressed(bool left_pressed, bool right_pressed, bool middle_pressed)
+{
+    switch (scroll_exit_button)
+    {
+    case SCROLL_EXIT_LEFT:
+        return left_pressed;
+
+    case SCROLL_EXIT_RIGHT:
+        return right_pressed;
+
+    case SCROLL_EXIT_MIDDLE:
+        return middle_pressed;
+
+    default:
+        return false;
+    }
 }
 
 static void maybe_enter_bootsel(bool bootsel_combo_pressed)
 {
-    if (primary_state_is_scroll_locked())
+    if (primary_state_is_scroll_mode())
     {
         bootsel_armed = false;
         return;
@@ -246,7 +281,7 @@ static void maybe_enter_bootsel(bool bootsel_combo_pressed)
     }
 }
 
-static void update_primary_button_state(bool left_pressed, bool right_pressed)
+static void update_primary_button_state(bool left_pressed, bool right_pressed, bool middle_pressed)
 {
     primary_click_pulse_mask = 0;
 
@@ -317,17 +352,43 @@ static void update_primary_button_state(bool left_pressed, bool right_pressed)
         }
         break;
 
-    case PRIMARY_SCROLL:
-        if (!left_pressed || !right_pressed)
+    case PRIMARY_SCROLL_HELD:
+        if (!left_pressed && !right_pressed)
         {
-            exit_scroll_mode();
+            primary_button_state = PRIMARY_SCROLL_LATCHED;
+            scroll_exit_ready = false;
         }
         break;
 
-    case PRIMARY_LOCKOUT:
-        if (!left_pressed && !right_pressed)
+    case PRIMARY_SCROLL_LATCHED:
+        if (!scroll_exit_ready)
         {
-            primary_button_state = PRIMARY_IDLE;
+            if (!left_pressed && !right_pressed && !middle_pressed)
+            {
+                scroll_exit_ready = true;
+            }
+        }
+        else if (left_pressed)
+        {
+            primary_button_state = PRIMARY_SCROLL_EXIT_PENDING;
+            scroll_exit_button = SCROLL_EXIT_LEFT;
+        }
+        else if (right_pressed)
+        {
+            primary_button_state = PRIMARY_SCROLL_EXIT_PENDING;
+            scroll_exit_button = SCROLL_EXIT_RIGHT;
+        }
+        else if (middle_pressed)
+        {
+            primary_button_state = PRIMARY_SCROLL_EXIT_PENDING;
+            scroll_exit_button = SCROLL_EXIT_MIDDLE;
+        }
+        break;
+
+    case PRIMARY_SCROLL_EXIT_PENDING:
+        if (!tracked_scroll_exit_button_pressed(left_pressed, right_pressed, middle_pressed))
+        {
+            leave_scroll_mode();
         }
         break;
     }
@@ -475,20 +536,20 @@ void hid_task(void)
     side_right_pressed = gpio_get(SIDE_RIGHT);
     bootsel_combo_pressed = bottom_left_pressed && bottom_right_pressed;
 
-    update_primary_button_state(side_middle_pressed, side_right_pressed);
+    update_primary_button_state(side_middle_pressed, side_right_pressed, side_left_pressed);
     maybe_enter_bootsel(bootsel_combo_pressed);
     update_cpi_buttons(top_left_pressed, top_right_pressed);
 
     report.buttons |= primary_buttons_report(side_middle_pressed, side_right_pressed);
 
-    if (side_left_pressed)
+    if (side_left_pressed && !primary_state_is_scroll_mode())
         report.buttons |= BUTTON_MIDDLE;
     if (bottom_left_pressed && !bootsel_combo_pressed)
-        report.buttons |= BUTTON_FORWARD;
-    if (bottom_right_pressed && !bootsel_combo_pressed)
         report.buttons |= BUTTON_BACK;
+    if (bottom_right_pressed && !bootsel_combo_pressed)
+        report.buttons |= BUTTON_FORWARD;
 
-    if (primary_button_state == PRIMARY_SCROLL)
+    if (primary_state_is_scroll_mode())
     {
         pointer_reset();
         scroll_fill_report(dx, dy, &report);
@@ -535,6 +596,8 @@ void report_init(void)
     dpi_up_was_pressed = false;
     current_cpi_index = 0;
     primary_click_pulse_mask = 0;
+    scroll_exit_button = SCROLL_EXIT_NONE;
+    scroll_exit_ready = false;
     pointer_reset();
     scroll_init();
 }

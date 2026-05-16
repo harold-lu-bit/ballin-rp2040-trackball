@@ -13,12 +13,14 @@ The firmware currently exposes seven physical buttons with this default mapping:
 - `SIDE_MIDDLE`: Left Mouse Button
 - `SIDE_RIGHT`: Right Mouse Button
 - `SIDE_LEFT`: Mouse Middle Button
-- `BOTTOM_LEFT`: Mouse 5 / Forward
-- `BOTTOM_RIGHT`: Mouse 4 / Back
+- `BOTTOM_LEFT`: Mouse 5 / BACK
+- `BOTTOM_RIGHT`: Mouse 4 / FORWARD
 - `TOP_LEFT`: DPI down
 - `TOP_RIGHT`: DPI up
 
-Hardware scrolling is built into the firmware: press the left and right mouse buttons (`SIDE_MIDDLE` + `SIDE_RIGHT`) within `60ms` to enter scroll mode. While scrolling, left/right button events are suppressed; releasing either button exits scroll mode and temporarily locks left/right clicks until both buttons are fully released again.
+The firmware also includes a software `BOOTSEL` shortcut: hold `BOTTOM_LEFT` + `BOTTOM_RIGHT` together for about 2 seconds to reboot the RP2040 into USB bootloader mode for flashing.
+
+Hardware scrolling is built into the firmware: press the left and right mouse buttons (`SIDE_MIDDLE` + `SIDE_RIGHT`) within `60ms` to enter scroll mode. Once active, scrolling stays latched even after those two buttons are released. Left, right, and middle button events are suppressed throughout scroll mode, and the next complete left/right/middle click exits back to normal pointer mode without being reported to the host.
 
 ### Scroll tuning
 If you want to adjust the built-in scrolling behavior, the main knobs are:
